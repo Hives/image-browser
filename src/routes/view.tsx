@@ -1,6 +1,11 @@
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate, useRouter } from '@tanstack/react-router'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { listFolder, type FolderContents, type FolderEntry } from '#/serverFns/listFolder'
+import { listImages } from '#/serverFns/listImages'
+import { deleteImage } from '#/serverFns/deleteImage'
+
+// Survives component unmount during pending navigation
+let pendingImagePath: string | null = null
 
 export const Route = createFileRoute('/view')({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -18,30 +23,46 @@ function ViewerPage() {
   const data = Route.useLoaderData()
   const { root } = Route.useSearch()
   const navigate = useNavigate()
+  const router = useRouter()
 
   const [selectedImageIndex, setSelectedImageIndex] = useState(0)
   const [isPanelOpen, setIsPanelOpen] = useState(false)
   const [folderCursor, setFolderCursor] = useState(0)
   const [isFill, setIsFill] = useState(true)
+  const [previewImages, setPreviewImages] = useState<string[] | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const thumbnailRefs = useRef<(HTMLButtonElement | null)[]>([])
   const panelItemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const folderCursorHistory = useRef<Map<string, number>>(new Map())
 
   const goToFolder = useCallback(
-    (folder: string) => navigate({ to: '/view', search: { folder, root } }),
-    [navigate, root],
+    (folder: string, imagePath?: string) => {
+      folderCursorHistory.current.set(data.folder, folderCursor)
+      if (imagePath) pendingImagePath = imagePath
+      navigate({ to: '/view', search: { folder, root } })
+    },
+    [navigate, root, data.folder, folderCursor],
   )
 
-  // Reset per-folder state when folder changes
+  // Reset per-folder state when folder changes, restoring saved cursor
   useEffect(() => {
-    setSelectedImageIndex(0)
-    setFolderCursor(0)
+    const pending = pendingImagePath
+    pendingImagePath = null
+    if (pending) {
+      const idx = data.images.indexOf(pending)
+      setSelectedImageIndex(idx !== -1 ? idx : 0)
+    } else {
+      setSelectedImageIndex(0)
+    }
+    setFolderCursor(folderCursorHistory.current.get(data.folder) ?? 0)
   }, [data.folder])
 
   // Auto-scroll selected thumbnail
   useEffect(() => {
     thumbnailRefs.current[selectedImageIndex]?.scrollIntoView({
-      block: 'nearest',
+      block: 'center',
       behavior: 'smooth',
     })
   }, [selectedImageIndex])
@@ -63,6 +84,21 @@ function ViewerPage() {
     if (imgIdx !== -1) setSelectedImageIndex(imgIdx)
   }, [folderCursor, isPanelOpen, data.entries, data.images])
 
+  // When panel cursor lands on a directory, fetch preview images (debounced)
+  useEffect(() => {
+    if (!isPanelOpen) { setPreviewImages(null); return }
+    const entry = data.entries[folderCursor]
+    if (!entry?.isDirectory) { setPreviewImages(null); return }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      setPreviewLoading(true)
+      listImages({ data: { folder: entry.path } }).then(imgs => {
+        if (!cancelled) { setPreviewImages(imgs); setPreviewLoading(false) }
+      })
+    }, 150)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [folderCursor, isPanelOpen, data.entries])
+
   const goToNextSibling = useCallback(() => {
     if (!data.siblings.length || data.folder === root) return
     const idx = data.siblings.indexOf(data.folder)
@@ -81,25 +117,46 @@ function ViewerPage() {
     if (data.parent && data.folder !== root) goToFolder(data.parent)
   }, [data.parent, data.folder, root, goToFolder])
 
+  const handleDelete = useCallback(async () => {
+    const img = data.images[selectedImageIndex]
+    if (!img) return
+    const nextIndex = Math.min(selectedImageIndex, data.images.length - 2)
+    await deleteImage({ data: { path: img } })
+    setConfirmDelete(false)
+    await router.invalidate()
+    setSelectedImageIndex(Math.max(nextIndex, 0))
+  }, [data.images, selectedImageIndex, router])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).tagName === 'INPUT') return
+      if (confirmDelete) {
+        if (e.key === 'Enter') { e.preventDefault(); handleDelete() }
+        if (e.key === 'Escape') { e.preventDefault(); setConfirmDelete(false) }
+        return
+      }
 
       if (isPanelOpen) {
         switch (e.key) {
           case 'j':
             e.preventDefault()
-            setFolderCursor(i => Math.min(i + 1, data.entries.length - 1))
+            setFolderCursor(i => (i + 1) % data.entries.length)
             break
           case 'k':
             e.preventDefault()
-            setFolderCursor(i => Math.max(i - 1, 0))
+            setFolderCursor(i => (i - 1 + data.entries.length) % data.entries.length)
             break
           case 'l':
-          case 'Enter':
             e.preventDefault()
             if (data.entries[folderCursor]?.isDirectory)
               goToFolder(data.entries[folderCursor].path)
+            break
+          case 'Enter':
+            e.preventDefault()
+            if (data.entries[folderCursor]?.isDirectory) {
+              goToFolder(data.entries[folderCursor].path)
+              setIsPanelOpen(false)
+            }
             break
           case 'h':
             e.preventDefault()
@@ -151,6 +208,17 @@ function ViewerPage() {
             e.preventDefault()
             setIsFill(v => !v)
             break
+          case 'd':
+            e.preventDefault()
+            if (data.images.length > 0) setConfirmDelete(true)
+            break
+          case 'h':
+            e.preventDefault()
+            if (data.parent && data.folder !== root) {
+              goToFolder(data.parent)
+              setIsPanelOpen(true)
+            }
+            break
           case 'PageDown':
             e.preventDefault()
             if (data.images.length > 0)
@@ -165,13 +233,15 @@ function ViewerPage() {
       }
     }
 
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    window.addEventListener('keydown', handler, { capture: true })
+    return () => window.removeEventListener('keydown', handler, { capture: true })
   }, [
     isPanelOpen,
     data.images.length,
     data.entries,
     folderCursor,
+    confirmDelete,
+    handleDelete,
     goToFolder,
     goToNextSibling,
     goToPrevSibling,
@@ -211,8 +281,40 @@ function ViewerPage() {
           </span>
         </div>
 
-        {/* Image or empty hint */}
-        {data.images.length > 0 && selectedImage ? (
+        {/* Image, folder preview, or empty hint */}
+        {isPanelOpen && (previewLoading || previewImages !== null) ? (
+          previewLoading ? (
+            <div className="text-neutral-500">
+              <svg className="h-6 w-6 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+              </svg>
+            </div>
+          ) : previewImages!.length === 0 ? (
+            <div className="text-center text-neutral-500">
+              <p className="text-lg">No images in this folder</p>
+            </div>
+          ) : (
+            <div className="h-full w-full overflow-y-auto p-3">
+              <div className="grid grid-cols-9 gap-1">
+                {previewImages!.map(img => (
+                  <button
+                    key={img}
+                    onClick={() => goToFolder(data.entries[folderCursor].path, img)}
+                    className="overflow-hidden rounded focus:outline-none"
+                  >
+                    <img
+                      src={`/api/image?path=${encodeURIComponent(img)}`}
+                      alt={img.split('/').pop()}
+                      className="aspect-square w-full object-cover transition-opacity hover:opacity-80"
+                      loading="lazy"
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )
+        ) : data.images.length > 0 && selectedImage ? (
           <img
             key={selectedImage}
             src={`/api/image?path=${encodeURIComponent(selectedImage)}`}
@@ -248,6 +350,30 @@ function ViewerPage() {
             onClose={() => setIsPanelOpen(false)}
           />
         </div>
+
+        {/* Delete confirmation modal */}
+        {confirmDelete && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+            <div className="rounded-xl bg-neutral-900 p-6 shadow-2xl ring-1 ring-neutral-700">
+              <p className="mb-1 text-sm font-medium text-white">Delete image?</p>
+              <p className="mb-5 max-w-xs truncate text-xs text-neutral-400">{selectedFilename}</p>
+              <div className="flex gap-3">
+                <button
+                  onClick={handleDelete}
+                  className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500"
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="rounded-lg bg-neutral-700 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-neutral-600"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Thumbnail sidebar */}
@@ -255,7 +381,9 @@ function ViewerPage() {
         {data.images.length === 0 ? (
           <div className="p-4 text-center text-xs text-neutral-600">No images</div>
         ) : (
-          data.images.map((img, i) => {
+          <>
+          <div className="h-[50vh]" aria-hidden />
+          {data.images.map((img, i) => {
             const filename = img.split('/').pop() ?? ''
             const isSelected = i === selectedImageIndex
             return (
@@ -265,30 +393,32 @@ function ViewerPage() {
                   thumbnailRefs.current[i] = el
                 }}
                 onClick={() => setSelectedImageIndex(i)}
-                className={`block w-full cursor-pointer p-2 text-left transition-colors ${
-                  isSelected ? 'bg-neutral-700' : 'hover:bg-neutral-800'
+                className={`block w-full cursor-pointer text-left transition-all ${
+                  isSelected ? 'bg-neutral-600 px-1.5 py-1.5' : 'p-2 hover:bg-neutral-800'
                 }`}
               >
                 <div
-                  className={`overflow-hidden rounded ${isSelected ? 'ring-2 ring-white' : ''}`}
+                  className={`overflow-hidden rounded ${isSelected ? 'ring-2 ring-white shadow-lg shadow-white/10' : ''}`}
                 >
                   <img
                     src={`/api/image?path=${encodeURIComponent(img)}`}
                     alt={filename}
-                    className="aspect-square w-full object-cover"
+                    className={`aspect-square w-full object-cover transition-opacity ${isSelected ? '' : 'opacity-40'}`}
                     loading="lazy"
                   />
                 </div>
                 <p
-                  className={`mt-1 truncate text-center text-[10px] leading-tight ${
-                    isSelected ? 'text-white' : 'text-neutral-400'
+                  className={`mt-1 truncate text-center leading-tight ${
+                    isSelected ? 'text-[11px] font-medium text-white' : 'text-[10px] text-neutral-400'
                   }`}
                 >
                   {filename}
                 </p>
               </button>
             )
-          })
+          })}
+          <div className="h-[50vh]" aria-hidden />
+          </>
         )}
       </div>
     </div>
