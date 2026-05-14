@@ -263,6 +263,25 @@ function ViewerPage() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-black">
+      {/* Folder panel — flex sibling so it pushes the image panel */}
+      <div
+        className={`flex-shrink-0 overflow-hidden bg-neutral-900 shadow-[4px_0_32px_rgba(0,0,0,0.6)] transition-[width] duration-300 ease-in-out ${
+          isPanelOpen ? 'w-72' : 'w-0'
+        }`}
+      >
+        <div className="h-full w-72">
+          <FolderPanel
+            data={data}
+            root={root}
+            folderCursor={folderCursor}
+            itemRefs={panelItemRefs}
+            onNavigate={goToFolder}
+            onGoUp={goToParent}
+            onClose={() => setIsPanelOpen(false)}
+          />
+        </div>
+      </div>
+
       {/* Main image area */}
       <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-neutral-950">
         {/* Top bar */}
@@ -295,8 +314,8 @@ function ViewerPage() {
               <p className="text-lg">No images in this folder</p>
             </div>
           ) : (
-            <div className="h-full w-full overflow-y-auto p-3">
-              <div className="grid grid-cols-9 gap-1">
+            <div className="flex h-full w-full items-center justify-center p-3">
+              <div className="grid w-full grid-cols-[repeat(auto-fill,minmax(0,1fr))] gap-1" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
                 {previewImages!.map(img => (
                   <button
                     key={img}
@@ -306,7 +325,7 @@ function ViewerPage() {
                     <img
                       src={`/api/image?path=${encodeURIComponent(img)}`}
                       alt={img.split('/').pop()}
-                      className="aspect-square w-full object-cover transition-opacity hover:opacity-80"
+                      className="aspect-square w-full object-contain transition-opacity hover:opacity-80"
                       loading="lazy"
                     />
                   </button>
@@ -333,23 +352,6 @@ function ViewerPage() {
             </p>
           </div>
         )}
-
-        {/* Folder panel overlay */}
-        <div
-          className={`absolute inset-y-0 left-0 z-20 w-72 transform overflow-hidden bg-neutral-900 shadow-[4px_0_32px_rgba(0,0,0,0.6)] transition-transform duration-300 ease-in-out ${
-            isPanelOpen ? 'translate-x-0' : '-translate-x-full'
-          }`}
-        >
-          <FolderPanel
-            data={data}
-            root={root}
-            folderCursor={folderCursor}
-            itemRefs={panelItemRefs}
-            onNavigate={goToFolder}
-            onGoUp={goToParent}
-            onClose={() => setIsPanelOpen(false)}
-          />
-        </div>
 
         {/* Delete confirmation modal */}
         {confirmDelete && (
