@@ -33,7 +33,10 @@ export interface FolderContents {
 export const listFolder = createServerFn({ method: 'GET' })
   .inputValidator((data: { folder: string }) => data)
   .handler(async ({ data: { folder } }): Promise<FolderContents> => {
-    const resolved = path.resolve(folder)
+    const expanded = folder.startsWith('~')
+      ? path.join(process.env.HOME ?? process.env.USERPROFILE ?? '~', folder.slice(1))
+      : folder
+    const resolved = path.resolve(expanded)
     const dirList = await fs.readdir(resolved, { withFileTypes: true })
 
     const images = sortedPaths(
