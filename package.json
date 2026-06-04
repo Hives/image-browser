@@ -18,11 +18,13 @@
     "@tanstack/react-router-devtools": "latest",
     "@tanstack/react-router-ssr-query": "latest",
     "@tanstack/react-start": "latest",
+    "@tanstack/react-virtual": "^3.14.2",
     "@tanstack/router-plugin": "^1.132.0",
     "lucide-react": "^0.545.0",
     "nitro": "npm:nitro-nightly@latest",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4.1.18"
   },
   "devDependencies": {

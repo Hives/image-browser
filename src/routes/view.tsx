@@ -1,5 +1,6 @@
 import { createFileRoute, Link, useNavigate, useRouter } from '@tanstack/react-router'
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { listFolder, type FolderContents } from '#/serverFns/listFolder'
 import { listImages } from '#/serverFns/listImages'
 import { deleteImage } from '#/serverFns/deleteImage'
@@ -60,9 +61,21 @@ function buildGridItems(data: FolderContents, root: string): GridItem[] {
 
 function ViewerPage() {
   const data = Route.useLoaderData()
-  const { root } = Route.useSearch()
+  const { root, folder: searchFolder } = Route.useSearch()
   const navigate = useNavigate()
   const router = useRouter()
+
+  // When root is an unresolved path (e.g. ~/...) the server resolves it; use the
+  // resolved value so display and navigation are correct from the first render.
+  // On the next tick we also replace the URL so the resolved path is persisted.
+  const effectiveRoot =
+    searchFolder === root && data.folder !== root ? data.folder : root
+
+  useEffect(() => {
+    if (effectiveRoot !== root) {
+      navigate({ to: '/view', search: { folder: data.folder, root: data.folder }, replace: true })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [mode, setMode] = useState<Mode>('folder')
   const [selectedImageIndex, setSelectedImageIndex] = useState(0)
@@ -81,11 +94,11 @@ function ViewerPage() {
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   const thumbnailRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const gridItemRefs = useRef<(HTMLDivElement | null)[]>([])
+  const gridScrollRef = useRef<(index: number) => void>(() => {})
   const colsRef = useRef(4)
   const folderCursorHistory = useRef<Map<string, number>>(new Map())
 
-  const gridItems = useMemo(() => buildGridItems(data, root), [data, root])
+  const gridItems = useMemo(() => buildGridItems(data, effectiveRoot), [data, effectiveRoot])
 
   useEffect(() => {
     try { localStorage.setItem(CELL_SIZE_KEY, String(gridCellSize)) } catch {}
@@ -95,9 +108,9 @@ function ViewerPage() {
     (folder: string, imagePath?: string) => {
       folderCursorHistory.current.set(data.folder, gridCursor)
       if (imagePath) pendingImagePath = imagePath
-      navigate({ to: '/view', search: { folder, root } })
+      navigate({ to: '/view', search: { folder, root: effectiveRoot } })
     },
-    [navigate, root, data.folder, gridCursor],
+    [navigate, effectiveRoot, data.folder, gridCursor],
   )
 
   const handleGridItemClick = useCallback(
@@ -140,25 +153,22 @@ function ViewerPage() {
 
   // Auto-scroll grid cursor item
   useEffect(() => {
-    gridItemRefs.current[gridCursor]?.scrollIntoView({
-      block: 'nearest',
-      behavior: 'smooth',
-    })
+    gridScrollRef.current(gridCursor)
   }, [gridCursor])
 
   const goToNextSibling = useCallback(() => {
-    if (!data.siblings.length || data.folder === root) return
+    if (!data.siblings.length || data.folder === effectiveRoot) return
     const idx = data.siblings.indexOf(data.folder)
     if (idx === -1) return
     goToFolder(data.siblings[(idx + 1) % data.siblings.length])
-  }, [data.siblings, data.folder, root, goToFolder])
+  }, [data.siblings, data.folder, effectiveRoot, goToFolder])
 
   const goToPrevSibling = useCallback(() => {
-    if (!data.siblings.length || data.folder === root) return
+    if (!data.siblings.length || data.folder === effectiveRoot) return
     const idx = data.siblings.indexOf(data.folder)
     if (idx === -1) return
     goToFolder(data.siblings[(idx - 1 + data.siblings.length) % data.siblings.length])
-  }, [data.siblings, data.folder, root, goToFolder])
+  }, [data.siblings, data.folder, effectiveRoot, goToFolder])
 
   const handleDelete = useCallback(async () => {
     const img = data.images[selectedImageIndex]
@@ -240,7 +250,15 @@ function ViewerPage() {
           }
           case 'u':
             e.preventDefault()
-            if (data.parent && data.folder !== root) goToFolder(data.parent)
+            if (data.parent && data.folder !== effectiveRoot) goToFolder(data.parent)
+            break
+          case 'n':
+            e.preventDefault()
+            goToNextSibling()
+            break
+          case 'p':
+            e.preventDefault()
+            goToPrevSibling()
             break
           case ' ': {
             e.preventDefault()
@@ -295,9 +313,16 @@ function ViewerPage() {
             e.preventDefault()
             if (data.images.length > 0) setConfirmDelete(true)
             break
+          case 'u':
+            e.preventDefault()
+            if (data.parent && data.folder !== effectiveRoot) {
+              goToFolder(data.parent)
+              setMode('folder')
+            }
+            break
           case 'h':
             e.preventDefault()
-            if (data.parent && data.folder !== root) {
+            if (data.parent && data.folder !== effectiveRoot) {
               goToFolder(data.parent)
               setMode('folder')
             }
@@ -325,7 +350,7 @@ function ViewerPage() {
     data.images,
     data.parent,
     data.folder,
-    root,
+    effectiveRoot,
     confirmDelete,
     handleDelete,
     goToFolder,
@@ -336,10 +361,10 @@ function ViewerPage() {
 
   const selectedImage = data.images[selectedImageIndex]
   const selectedFilename = selectedImage?.split('/').pop() ?? ''
-  const rootFolderName = root.split('/').pop() || root
+  const rootFolderName = effectiveRoot.split('/').pop() || effectiveRoot
   const relativePath =
-    data.folder !== root && data.folder.startsWith(root)
-      ? data.folder.slice(root.length).replace(/^\//, '')
+    data.folder !== effectiveRoot && data.folder.startsWith(effectiveRoot)
+      ? data.folder.slice(effectiveRoot.length).replace(/^\//, '')
       : ''
   const displayPath = [
     rootFolderName,
@@ -382,7 +407,7 @@ function ViewerPage() {
             gridItems={gridItems}
             gridCursor={gridCursor}
             gridCellSize={gridCellSize}
-            itemRefs={gridItemRefs}
+            scrollRef={gridScrollRef}
             colsRef={colsRef}
             onItemClick={handleGridItemClick}
           />
@@ -458,7 +483,7 @@ function ViewerPage() {
                       className={`overflow-hidden rounded ${isSelected ? 'ring-2 ring-white shadow-lg shadow-white/10' : ''}`}
                     >
                       <img
-                        src={`/api/image?path=${encodeURIComponent(img)}`}
+                        src={`/api/image?path=${encodeURIComponent(img)}&w=176`}
                         alt={filename}
                         className={`aspect-square w-full object-cover transition-opacity ${isSelected ? '' : 'opacity-40'}`}
                         loading="lazy"
@@ -489,51 +514,93 @@ interface FolderGridProps {
   gridItems: GridItem[]
   gridCursor: number
   gridCellSize: number
-  itemRefs: React.RefObject<(HTMLDivElement | null)[]>
+  scrollRef: React.MutableRefObject<(index: number) => void>
   colsRef: React.MutableRefObject<number>
   onItemClick: (item: GridItem, index: number) => void
 }
 
-function FolderGrid({ gridItems, gridCursor, gridCellSize, itemRefs, colsRef, onItemClick }: FolderGridProps) {
-  const gridRef = useRef<HTMLDivElement>(null)
+function FolderGrid({ gridItems, gridCursor, gridCellSize, scrollRef, colsRef, onItemClick }: FolderGridProps) {
+  const parentRef = useRef<HTMLDivElement>(null)
+  const [cols, setCols] = useState(colsRef.current || 4)
 
+  // Compute columns from container width whenever size or cellSize changes
   useEffect(() => {
-    const el = gridRef.current
+    const el = parentRef.current
     if (!el) return
     const update = () => {
-      const template = window.getComputedStyle(el).getPropertyValue('grid-template-columns')
-      if (template && template !== 'none') {
-        colsRef.current = template.trim().split(/\s+/).length
-      }
+      const available = el.clientWidth - 32 // px-4 × 2
+      const c = Math.max(1, Math.floor((available + 12) / (gridCellSize + 12)))
+      setCols(c)
+      colsRef.current = c
     }
     update()
     const ro = new ResizeObserver(update)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [colsRef])
+  }, [colsRef, gridCellSize])
+
+  const rowCount = Math.ceil(gridItems.length / cols)
+  // aspect-square image + ~22px label + 12px gap between rows
+  const estimatedRowHeight = gridCellSize + 34
+
+  const virtualizer = useVirtualizer({
+    count: rowCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => estimatedRowHeight,
+    overscan: 2,
+  })
+
+  // Expose scroll-to-item for keyboard navigation
+  useEffect(() => {
+    scrollRef.current = (index: number) => {
+      if (rowCount === 0) return
+      virtualizer.scrollToIndex(Math.floor(index / cols), { align: 'auto' })
+    }
+  })
 
   return (
-    <div className="h-full w-full overflow-y-auto px-4 pb-16 pt-14">
+    <div ref={parentRef} className="h-full w-full overflow-y-auto px-4 pb-16 pt-14">
       {gridItems.length === 0 ? (
         <div className="flex h-full items-center justify-center text-neutral-600">
           Empty folder
         </div>
       ) : (
-        <div
-          ref={gridRef}
-          className="grid gap-3"
-          style={{ gridTemplateColumns: `repeat(auto-fill, ${gridCellSize}px)` }}
-        >
-          {gridItems.map((item, i) => (
-            <div key={item.path + item.type} ref={el => { itemRefs.current[i] = el }}>
-              <GridCell
-                item={item}
-                isSelected={i === gridCursor}
-                cellSize={gridCellSize}
-                onClick={() => onItemClick(item, i)}
-              />
-            </div>
-          ))}
+        <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+          {virtualizer.getVirtualItems().map(virtualRow => {
+            const startIdx = virtualRow.index * cols
+            return (
+              <div
+                key={virtualRow.index}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  transform: `translateY(${virtualRow.start}px)`,
+                  display: 'grid',
+                  gap: 12,
+                  gridTemplateColumns: `repeat(${cols}, ${gridCellSize}px)`,
+                  paddingBottom: 12,
+                }}
+              >
+                {Array.from({ length: cols }, (_, j) => {
+                  const i = startIdx + j
+                  const item = gridItems[i]
+                  if (!item) return null
+                  return (
+                    <GridCell
+                      key={item.path + item.type}
+                      item={item}
+                      index={i}
+                      isSelected={i === gridCursor}
+                      cellSize={gridCellSize}
+                      onItemClick={onItemClick}
+                    />
+                  )
+                })}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -544,12 +611,15 @@ function FolderGrid({ gridItems, gridCursor, gridCellSize, itemRefs, colsRef, on
 
 interface GridCellProps {
   item: GridItem
+  index: number
   isSelected: boolean
   cellSize: number
-  onClick: () => void
+  onItemClick: (item: GridItem, index: number) => void
 }
 
-function GridCell({ item, isSelected, onClick }: GridCellProps) {
+const GridCell = memo(function GridCell({ item, index, isSelected, cellSize, onItemClick }: GridCellProps) {
+  const handleClick = useCallback(() => onItemClick(item, index), [onItemClick, item, index])
+
   const shell = `rounded-lg overflow-hidden transition-all cursor-pointer ${
     isSelected
       ? 'ring-2 ring-white bg-neutral-700/60'
@@ -564,12 +634,12 @@ function GridCell({ item, isSelected, onClick }: GridCellProps) {
       </div>
     )
   } else if (item.type === 'folder') {
-    visual = <SubfolderPreview path={item.path} />
+    visual = <SubfolderPreview path={item.path} cellSize={cellSize} />
   } else if (item.type === 'image') {
     visual = (
       <div className="aspect-square overflow-hidden">
         <img
-          src={`/api/image?path=${encodeURIComponent(item.path)}`}
+          src={`/api/image?path=${encodeURIComponent(item.path)}&w=${cellSize * 2}`}
           alt={item.name}
           className="h-full w-full object-cover"
           loading="lazy"
@@ -585,7 +655,7 @@ function GridCell({ item, isSelected, onClick }: GridCellProps) {
   }
 
   return (
-    <div className={shell} onClick={onClick}>
+    <div className={shell} onClick={handleClick}>
       {visual}
       <p
         className={`truncate px-1.5 py-1 text-center text-[11px] leading-tight ${
@@ -596,11 +666,11 @@ function GridCell({ item, isSelected, onClick }: GridCellProps) {
       </p>
     </div>
   )
-}
+})
 
 // ── SubfolderPreview ────────────────────────────────────────────────────────
 
-function SubfolderPreview({ path }: { path: string }) {
+function SubfolderPreview({ path, cellSize }: { path: string; cellSize: number }) {
   const [previews, setPreviews] = useState<string[] | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -638,7 +708,7 @@ function SubfolderPreview({ path }: { path: string }) {
           previews && previews[idx] ? (
             <img
               key={previews[idx]}
-              src={`/api/image?path=${encodeURIComponent(previews[idx])}`}
+              src={`/api/image?path=${encodeURIComponent(previews[idx])}&w=${Math.ceil(cellSize / 2) * 2}`}
               alt=""
               className="h-full w-full object-cover"
               loading="lazy"
